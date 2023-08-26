@@ -15,6 +15,8 @@ router.get('/elderly',authorize(), getElderly);
 router.post('/find-volunteer',authorize(), findVolunteerSchema, findVolunteer);
 router.get('/volunteer-bookings',authorize(), getVolunteerBookings);
 router.get('/elderly-bookings',authorize(), getElderlyBookings);
+router.get('/sync-bank', authorize(), syncBank);
+//ccccrouter.post('/checkout', authorize(), checkout);
 router.post('/volunteer-bookings',authorize(), bookingRequest);
 router.post('/refresh-token', refreshToken);
 router.post('/revoke-token', authorize(), revokeTokenSchema, revokeToken);
@@ -28,6 +30,7 @@ router.get('/:id', authorize(), getById);
 router.post('/', authorize(Role.Admin), createSchema, create);
 router.put('/:id', authorize(), updateSchema, update);
 router.delete('/:id', authorize(), _delete);
+router.post('/add-bank', authorize(),addBankAccount);
 
 
 module.exports = router;
@@ -79,6 +82,29 @@ function authenticate(req, res, next) {
         })
         .catch(next);
 }
+
+function addBankAccount(req, res, next){
+    const user=req.user.id;
+    accountService.addBankAccount(user)
+        .then(({link}) => {
+            //setTokenCookie(res, refreshToken);
+            res.json({link});
+        })
+        .catch(next);
+}
+
+function syncBank(req, res, next){
+    const user=req.user.id;
+    console.log("syncing bank");
+    accountService.updateBankAccount(user)
+        .then((resp) => {
+            //setTokenCookie(res, refreshToken);
+            res.json(resp);
+        })
+        .catch(next);
+}
+
+
 
 function addElderly(req, res, next) {
     const { age, gender, city, address } = req.body;

@@ -7,6 +7,10 @@ const sendEmail = require("_helpers/send-email");
 const db = require("_helpers/db");
 const Role = require("_helpers/role");
 const { isAsyncFunction } = require("util/types");
+const Stripe = require("stripe");
+//const stripe = new Stripe('ENTER YOUR STRIPE KEY TO USE STRIPE PAYMENT SERVICE',{
+  apiVersion:'2022-11-15',
+//});
 
 module.exports = {
   authenticate,
@@ -30,6 +34,8 @@ module.exports = {
   delete: _delete,
   getElderlyBookings,
   bookingRequest,
+  addBankAccount,
+  updateBankAccount
 };
 
 async function authenticate({ email, password, ipAddress }) {
@@ -61,15 +67,102 @@ async function authenticate({ email, password, ipAddress }) {
 }
 
 async function addElderly({ age, gender, city, address,accountId }) {
-  const elderly = new db.Elderly({ age, gender, city, address,accountId });
-  await elderly.save();
+  const savedElderly = await db.Elderly.findOne({ where: { accountId } });
+  console.log("saved elderly is",savedElderly);
+  if(savedElderly){
+    savedElderly.city = city;
+    savedElderly.address = address;
+    await savedElderly.save();
+    return{
+      age: savedElderly.age,
+      address: savedElderly.address,
+      city: savedElderly.city,
+      gender: savedElderly.gender
+    }
+  }
+  else{
+    console.log("NOT SAVED ELDERLY");
+    const elderly = new db.Elderly({ age, gender, city, address,accountId });
+    await elderly.save();
+  }
+  
   return { age, gender, city, address };
 }
 
 async function addVolunteer({ age, hourlyCharge, city, gender,accountId}) {
-  const volunteer = new db.Volunteer({ age, gender, city, hourlyCharge,accountId});
-  await volunteer.save();
+  const savedVolunteer = await db.Volunteer.findOne({ where: { accountId } });
+  if(savedVolunteer){
+    savedVolunteer.city = city;
+    savedVolunteer.hourlyCharge = hourlyCharge;
+    await savedVolunteer.save();
+    return {
+      age: savedVolunteer.age,
+      city:savedVolunteer.city,
+      gender:savedVolunteer.gender,
+      hourlyCharge:savedVolunteer.hourlyCharge,
+
+    }
+  }
+  else
+  {
+    const volunteer = new db.Volunteer({ age, gender, city, hourlyCharge,accountId});
+    await volunteer.save();
+  }
   return { age, gender, city, hourlyCharge };
+}
+
+async function addBankAccount(accountId){
+  
+  const account = await db.Account.findOne({ where: {id: accountId} });
+  const stripeAccount = await stripe.accounts.create({
+    type: 'express',
+    email: account.email,
+    country: 'AU',
+    business_type: 'individual',
+    individual: {
+      email: account.email,
+      first_name: account.firstName,
+      last_name: account.lastName,
+    },
+    capabilities: {
+      transfers: {
+        requested: true,
+      },
+      card_payments: {
+        requested: false,
+      }
+    },
+    tos_acceptance: {
+      service_agreement: 'recipient',
+    },
+    settings: {
+      payouts: {
+        schedule: {
+          interval: 'manual',
+        },
+      },
+    },
+    metadata:{
+      accountId,
+
+    },
+  })
+  try{
+  const link = await stripe.accountLinks.create({
+    account: stripeAccount.id,
+    return_url: `http://localhost:4200/${account.role}/payment?action=bank`,
+    refresh_url: `http://localhost:4200/${account.role}/payment?action=bankagain`,
+    type: 'account_onboarding',
+  });
+  const payment = new db.Payment({stripeAccountId:stripeAccount.id,accountId})
+  await payment.save();
+  console.log(link.url);
+  return {link:link.url}
+}
+catch(err){
+  console.log(err);
+  stripe.accounts.del(stripeAccount.id)
+}
 }
 
 async function getElderly(accountId) {
@@ -140,8 +233,9 @@ async function refreshToken({ token, ipAddress }) {
 }
 
 async function bookingRequest(elderlyAccountId, days, hours, budget,volunteerId) {
-    const elderly = await db.Elderly.findOne({ where: { accountId:elderlyAccountId } });
-    const volunteer = await db.Volunteer.findOne({ where: { id:volunteerId } });
+    const elderly = await db.Elderly.findOne({ where: { accountId:elderlyAccountId },include: [{ model: db.Account }], });
+    const volunteer = await db.Volunteer.findOne({ where: { id:volunteerId },include: [{ model: db.Account }], });
+    const volunteerPayment = await db.Payment.findOne({where: {accountId:volunteer.accountId}})
     const startDate = new Date()
     startDate.setDate(startDate.getDate()+1)
     const endDate = new Date()
@@ -156,7 +250,33 @@ async function bookingRequest(elderlyAccountId, days, hours, budget,volunteerId)
         volunteerId:volunteer.id
     })
     await booking.save()
-    return {message:'booking request placed'}
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],mode:'payment',
+      customer_email:elderly.account.email,
+      success_url:`http://localhost:4200/elderly/find-volunteer?action=bookingdone`,
+      cancel_url:`http://localhost:4200/elderly/find-volunteer?action=bookingfailed`,
+      metadata:{
+        bookingId:booking.id,
+      },
+      payment_intent_data:{
+        transfer_data:{
+          destination:volunteerPayment.stripeAccountId
+        }
+      },
+      line_items:[{
+        quantity:hours*days,
+        price_data:{
+          currency:'USD',
+          unit_amount:volunteer.hourlyCharge*100,
+          product_data:{
+            name:`Volunteer Service: ${volunteer.account.firstName} ${volunteer.account.lastName}`
+          }
+        }
+
+      }]
+   })
+    console.log("session:",session);
+    return {message:'booking request placed',link:session.url}
   }
 
 async function revokeToken({ token, ipAddress }) {
@@ -166,6 +286,33 @@ async function revokeToken({ token, ipAddress }) {
   refreshToken.revoked = Date.now();
   refreshToken.revokedByIp = ipAddress;
   await refreshToken.save();
+}
+
+async  function updateBankAccount(accountId){
+  const stripeAccount = await db.Payment.findOne({ where: {accountId} })
+  const stripeAccountInfo = await stripe.accounts.retrieve(stripeAccount.stripeAccountId)
+  if (
+    stripeAccountInfo.external_accounts &&
+    stripeAccountInfo.external_accounts.data.length > 0
+  ) {
+    let isVerified = false;
+    if (
+     stripeAccountInfo.requirements?.disabled_reason === null &&
+     stripeAccountInfo.payouts_enabled &&
+     stripeAccountInfo.charges_enabled &&
+     stripeAccountInfo.requirements?.eventually_due?.length === 0
+    ) {
+      isVerified = true;
+    }
+    const acc = stripeAccountInfo.external_accounts.data[0]
+    stripeAccount.bankName=acc.bank_name
+    stripeAccount.lastFour = acc.last4
+    stripeAccount.paymentMethodId=acc.id
+    stripeAccount.isVerified = isVerified
+    await stripeAccount.save();
+    
+  }
+  return stripeAccount;
 }
 
 async function register(params, origin) {

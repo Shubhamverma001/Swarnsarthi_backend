@@ -22,6 +22,7 @@ async function initialize() {
         db.RefreshToken = require('../accounts/refresh-token.model')(sequelize);
         db.Elderly = require('../accounts/elderly.model')(sequelize);
         db.Volunteer = require('../accounts/volunteer.model')(sequelize);
+        db.Payment = require('../accounts/payment.model')(sequelize);
     // define relationships
     db.Account.hasMany(db.RefreshToken, { onDelete: 'CASCADE' });
     db.RefreshToken.belongsTo(db.Account);
@@ -33,6 +34,8 @@ async function initialize() {
     db.Volunteer.belongsTo(db.Account);
     db.Elderly.hasOne(db.Booking,{allowNull:true})
     db.Booking.belongsTo(db.Elderly)
+    db.Account.hasOne(db.Payment,{allowNull:true})
+    db.Payment.belongsTo(db.Account)
      await sequelize.sync();
     })
     .catch(function (err) {
